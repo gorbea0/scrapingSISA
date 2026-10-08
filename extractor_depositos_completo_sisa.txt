@@ -1,0 +1,95 @@
+/* SISA Depósitos: CSV plano + JSON íntegro, solo Vitoria-Gasteiz.
+   Ejecutar en Edge F12 > Consola, desde el LISTADO tras pulsar Buscar.
+   Lectura local de la tabla; no consulta fichas ni modifica datos. */
+(async () => {
+  'use strict';
+  const MUNICIPIO = '059';
+  const ESPERA = 300;
+  const dormir = ms => new Promise(r => setTimeout(r, ms));
+  const jq = window.jQuery;
+  if (!jq?.fn?.dataTable) throw new Error('DataTables no está disponible. Vuelve al listado.');
+  const tabla = [...document.querySelectorAll('table')].find(t =>
+    jq.fn.dataTable.isDataTable(t) &&
+    /Denominaci[oó]n|Dep[oó]sitos ETAP/i.test(t.querySelector('thead')?.innerText || '')
+  );
+  if (!tabla) throw new Error('No se encuentra la tabla DataTables de depósitos. Vuelve al listado y pulsa Buscar.');
+  const api = jq(tabla).DataTable();
+  const info = api.page.info();
+  if (!confirm(`¿Está aplicado el filtro Vitoria-Gasteiz? Se revisarán ${info.pages} páginas y se excluirán las fichas cuyo municipio no sea Vitoria-Gasteiz. No se modifica SISA.`)) return;
+
+  const originales = new Map();
+  const rechazados = [];
+  const paginaOriginal = info.page;
+  const capturar = () => {
+    api.rows({page:'current'}).every(function () {
+      const r = this.data();
+      if (!r || typeof r !== 'object' || Array.isArray(r)) return;
+      const codigo = String(r.codigoElemento ?? '').trim();
+      const municipio = String(r.localizacion?.codMunicipio ?? '').padStart(3, '0');
+      const nombreMunicipio = String(r.localizacion?.nombreMunicipio ?? '');
+      if (municipio !== MUNICIPIO && !/^Vitoria-Gasteiz$/i.test(nombreMunicipio)) {
+        rechazados.push({codigo, municipio, nombreMunicipio});
+        return;
+      }
+      if (codigo && !originales.has(codigo)) originales.set(codigo, r);
+    });
+  };
+  const irPagina = async p => {
+    if (api.page.info().page === p) { capturar(); return; }
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { api.off('draw.dt', onDraw); reject(new Error(`Tiempo agotado en página ${p+1}`)); }, 20000);
+      const onDraw = () => { clearTimeout(timeout); api.off('draw.dt', onDraw); resolve(); };
+      api.on('draw.dt', onDraw);
+      api.page(p).draw('page');
+    });
+    capturar();
+  };
+  try {
+    for (let p = 0; p < info.pages; p++) {
+      await irPagina(p);
+      console.log(`Página ${p+1}/${info.pages}: ${originales.size} depósitos únicos de Vitoria-Gasteiz`);
+      await dormir(ESPERA);
+    }
+  } finally {
+    if (api.page.info().page !== paginaOriginal) api.page(paginaOriginal).draw('page');
+  }
+  const registros = [...originales.values()];
+  if (!registros.length) throw new Error('No se encontraron depósitos de Vitoria-Gasteiz. Revisa el filtro.');
+  const extraer = (obj, ruta) => ruta.split('.').reduce((a, k) => a == null ? null : a[k], obj);
+  const campos = [
+    ['idElemento','idElemento'],['codigo','codigoElemento'],['denominacion','descripcionElemento'],
+    ['codigoSINAC','codigoSinac'],['municipio','localizacion.nombreMunicipio'],
+    ['municipioCodigo','localizacion.codMunicipio'],['localidadCodigo','localizacion.codLocalidad'],
+    ['zonaAbastecimiento','instalaciones.instalacionesZonas.nombreInstalacion'],
+    ['ambito','instalaciones.nombreInstalacion'],['idAmbito','instalaciones.idInstalacion'],
+    ['utmX','coordenadaGpsX'],['utmY','coordenadaGpsY'],['huso','huso'],['cota','cota'],
+    ['capacidad','capacidad'],['volumenMedioAgua','volumenMedioAgua'],['poblacionAbastecida','pobAbastecida'],
+    ['ubicacion','ubicacion'],['tipoDepositoCodigo','idTipoDeposito'],
+    ['compartimentado','compartimentado'],['numeroCompartimentos','numCompartimentos'],
+    ['cubierto','cubierto'],['claseDepositoCodigo','claseDeposito'],['tipoUsoCodigo','tipoUso'],
+    ['materialConstruccionCodigo','idMaterialConstDep'],['materialRevestimientoCodigo','idMaterialRevesDep'],
+    ['protegido','protegido'],['ventilacion','ventilacion'],['contador','contador'],
+    ['tipoDesinfeccion','tipoDesinfeccionDep.descEs'],['desinfectanteCodigo','idDesinfectanteDep'],
+    ['tipoDosificacionCloro','tipoDosifCloro'],['sistemaDosificacionCloro','sistemaDosifCloro'],
+    ['tiempoRetencionAgua','tiempoRetencionAgua'],['volumenAgua','volumenAgua'],
+    ['consumoDiarioAgua','consumoDiarioAgua'],['puntoTomaMuestras','puntoTomaMuestras'],
+    ['sistemaAlarma','sistemaAlarma'],['byPass','byPass'],['fechaUltLimpieza','fechaUltLimpieza'],
+    ['calificacionEstructuralCodigo','idCalificacionEstr'],['calificacionMantenimientoCodigo','idCalificacionMnto'],
+    ['fechaConstruccion','fechaConstruccion'],['fechaActualizacion','fechaActualizacion'],
+    ['fechaConsolidacion','fechaConsolidacion'],['observaciones','observaciones'],
+    ['etapCodigo','elementosEtap.codigoElemento'],['etapNombre','elementosEtap.descripcionElemento']
+  ];
+  const plano = registros.map(r => Object.fromEntries(campos.map(([nombre, ruta]) => [nombre, extraer(r, ruta) ?? ''])));
+  const celda = v => '"' + String(v ?? '').replace(/^[=+@\-\t\r]/, s => "'"+s).replace(/"/g,'""') + '"';
+  const csv = '\uFEFF' + [campos.map(x=>x[0]), ...plano.map(r=>campos.map(x=>r[x[0]]))].map(row=>row.map(celda).join(';')).join('\r\n');
+  const descargar = (nombre, contenido, tipo) => {
+    const url = URL.createObjectURL(new Blob([contenido], {type:tipo}));
+    const a = document.createElement('a'); a.href=url; a.download=nombre;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+  };
+  descargar('sisa_depositos_vitoria_completo.csv', csv, 'text/csv;charset=utf-8');
+  descargar('sisa_depositos_vitoria_original.json', JSON.stringify({fechaExtraccion:new Date().toISOString(), municipio:'Vitoria-Gasteiz', registros}, null, 2), 'application/json;charset=utf-8');
+  console.log(`FINALIZADO: ${registros.length} depósitos. Excluidos por municipio: ${rechazados.length}. CSV y JSON descargados.`);
+  console.log('Nota: los campos de la ficha que no figuren en los objetos del listado requieren una segunda extracción de detalle.');
+})();
